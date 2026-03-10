@@ -1,0 +1,23 @@
+ollama:
+  endpoint: "http://localhost:11434"
+  model: "qwen3-30b-a3b"
+  fallback_model: "qwen3-14b"
+  timeout_seconds: 120
+
+extraction:
+  engine: "docling"          # or "pymupdf"
+  confidence_threshold: 0.75 # below this, chunk is auto-flagged for HITL
+
+chunking:
+  split_levels: ["#", "##"]  # header levels that trigger a new chunk
+  min_chunk_tokens: 100
+  max_chunk_tokens: 1500
+
+output:
+  processed_root: "processed"
+  manifest_filename: "manifest.json"
+  corrections_filename: "corrections.json"
+
+hitl:
+  auto_accept_above: 0.92    # confidence score above which HITL is skipped
+  show_raw_markdown: true
