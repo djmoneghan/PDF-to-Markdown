@@ -1,7 +1,8 @@
 ollama:
   endpoint: "http://localhost:11434"
-  model: "qwen3-30b-a3b"
-  fallback_model: "qwen3-14b"
+  model: "gpt-oss:120b"
+  fallback_model: "gpt-oss:120b"
+  api_key: ""              # Optional: leave empty if not needed
   timeout_seconds: 120
 
 extraction:

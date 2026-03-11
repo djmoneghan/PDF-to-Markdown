@@ -255,5 +255,69 @@ class TestLoadConfigMissingKeys(unittest.TestCase):
         self.assertIn("extraction.confidence_threshold", str(ctx.exception))
 
 
+class TestSaveConfigRoundTrip(unittest.TestCase):
+    """save_config() writes valid YAML that load_config() can read back."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _minimal_valid_config(self) -> dict:
+        return {
+            "ollama": {
+                "endpoint": "http://localhost:11434",
+                "model": "test-model",
+                "fallback_model": "test-fallback",
+                "timeout_seconds": 60,
+            },
+            "extraction": {
+                "engine": "docling",
+                "confidence_threshold": 0.75,
+            },
+            "chunking": {
+                "split_levels": ["#", "##"],
+                "min_chunk_tokens": 100,
+                "max_chunk_tokens": 1500,
+            },
+            "output": {
+                "processed_root": "processed",
+                "manifest_filename": "manifest.json",
+                "corrections_filename": "corrections.json",
+            },
+            "hitl": {
+                "auto_accept_above": 0.92,
+                "show_raw_markdown": True,
+            },
+        }
+
+    def test_save_config_writes_file(self):
+        from ingestor import save_config
+        cfg = self._minimal_valid_config()
+        p = self.tmp_path / "config_out.yaml"
+        save_config(cfg, p)
+        self.assertTrue(p.exists())
+
+    def test_save_config_roundtrip(self):
+        from ingestor import save_config, load_config
+        cfg_original = self._minimal_valid_config()
+        p = self.tmp_path / "config_out.yaml"
+        save_config(cfg_original, p)
+        cfg_loaded = load_config(p)
+        self.assertEqual(cfg_original, cfg_loaded)
+
+    def test_save_config_with_missing_keys_raises(self):
+        from ingestor import save_config
+        cfg = self._minimal_valid_config()
+        del cfg["ollama"]["model"]
+        p = self.tmp_path / "config_out.yaml"
+        with self.assertRaises(ValueError) as ctx:
+            save_config(cfg, p)
+        self.assertIn("missing required key", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
