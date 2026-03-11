@@ -100,107 +100,49 @@ def main(argv: list[str] | None = None) -> int:  # returns exit code
 
 
 def _run_pipeline(args: argparse.Namespace) -> int:
-    # ------------------------------------------------------------------
-    # Stage 1 — load and validate config.yaml
-    # ------------------------------------------------------------------
-    from ingestor import load_config
+    """Execute the pipeline using PipelineOrchestrator with CLI-based callbacks."""
+    from ingestor.pipeline import PipelineOrchestrator
 
-    console.print(f"[bold]Kinetic Ingestor[/bold] — loading config from {args.config}")
-    try:
-        config = load_config(args.config)
-    except (FileNotFoundError, ValueError) as exc:
-        console.print(f"[bold red]Config error:[/bold red] {exc}")
-        return 1
+    def log_progress(stage: str, current: int, total: int) -> None:
+        """Log progress for each stage."""
+        # Only log when starting a new stage (current=1) to avoid spam
+        if current == 1:
+            console.print(f"[bold]{stage}[/bold] …")
 
-    # Apply --project override to config so downstream modules see it
-    if args.project:
-        config.setdefault("_runtime", {})["project_name"] = args.project
+    def log_chunk_ready(chunk_id: str, preview: str) -> None:
+        """Log chunk readiness (used during metadata generation)."""
+        # Brief feedback during metadata generation
+        pass  # Handled by verbose progress output in loop
 
-    # ------------------------------------------------------------------
-    # Stage 2 — extract PDF → DocumentContent
-    # ------------------------------------------------------------------
-    from ingestor.extractor import extract
+    def log_complete(output_dir) -> None:
+        """Log successful completion."""
+        console.print(f"[bold green]Done.[/bold green] Output: [cyan]{output_dir}[/cyan]")
 
-    pdf_path = args.pdf_path.resolve()
-    console.print(f"Extracting [cyan]{pdf_path.name}[/cyan] …")
-    doc = extract(pdf_path, config)
-    console.print(
-        f"  Extracted {len(doc.pages)} page(s), "
-        f"{len(doc.tables)} table(s), "
-        f"{len(doc.formula_blocks)} formula(s) "
-        f"[dim](engine: {doc.extraction_engine})[/dim]"
+    def log_error(exc: Exception) -> None:
+        """Log errors (re-raised after callback)."""
+        pass  # Exception will be re-raised and handled by outer try/except
+
+    orchestrator = PipelineOrchestrator(
+        on_progress=log_progress,
+        on_chunk_ready=log_chunk_ready,
+        on_complete=log_complete,
+        on_error=log_error,
     )
 
-    # ------------------------------------------------------------------
-    # Stage 3 — chunk → list[Chunk]
-    # ------------------------------------------------------------------
-    from ingestor.chunker import chunk as chunk_doc
-
-    console.print("Chunking document …")
-    chunks = chunk_doc(doc, config)
-    console.print(f"  Produced {len(chunks)} chunk(s).")
-
-    # ------------------------------------------------------------------
-    # Stage 4 — metadata generation (Ollama)
-    # ------------------------------------------------------------------
-    from ingestor.metadata import generate_metadata
-
-    console.print("Generating metadata via Ollama …")
-    for i, ch in enumerate(chunks, 1):
-        try:
-            meta = generate_metadata(ch, config)
-        except Exception as exc:  # noqa: BLE001
-            console.print(
-                f"  [yellow]Warning:[/yellow] metadata generation failed for "
-                f"{ch.chunk_id}: {exc}"
-            )
-            meta = {}
-        ch.metadata = meta
-        ch.confidence_score = float(meta.get("confidence_score", 0.0))
-        console.print(
-            f"  [{i}/{len(chunks)}] {ch.chunk_id} "
-            f"— confidence {ch.confidence_score:.2f}",
-            end="\r",
-        )
-    console.print()  # newline after \r progress
-
-    # ------------------------------------------------------------------
-    # Stage 5 — HITL review loop
-    # ------------------------------------------------------------------
-    from ingestor.hitl import run_review
-
-    console.print("Starting HITL review …")
-    reviewed = run_review(chunks, config)
-
-    # ------------------------------------------------------------------
-    # Stage 6 — export .md files + manifest.json
-    # ------------------------------------------------------------------
-    from ingestor.exporter import export
-
-    # Honour --project override: patch source_pdf_path stem if needed
-    effective_pdf_path = pdf_path
-    if args.project:
-        # Synthesise a path whose stem matches the desired project_name so
-        # _derive_project_name() produces the right directory.
-        effective_pdf_path = pdf_path.with_name(
-            args.project.replace(" ", "_").lower() + pdf_path.suffix
-        )
-
-    console.print("Exporting chunks …")
     try:
-        output_dir = export(reviewed, effective_pdf_path, config, force=args.force)
-    except FileExistsError as exc:
-        console.print(
-            f"[bold red]Output conflict:[/bold red] {exc}\n"
-            "Re-run with [bold]--force[/bold] to overwrite."
+        orchestrator.run(
+            pdf_path=args.pdf_path,
+            config_path=args.config,
+            project_name=args.project,
+            force=args.force,
         )
-        return 1
-
-    console.print(
-        f"[bold green]Done.[/bold green] "
-        f"{len(reviewed)} chunk(s) written to [cyan]{output_dir}[/cyan]."
-    )
-    return 0
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        if args.debug:
+            raise
+        else:
+            console.print(f"[bold red]Error:[/bold red] {exc}")
+            return 1
 
 
 if __name__ == "__main__":

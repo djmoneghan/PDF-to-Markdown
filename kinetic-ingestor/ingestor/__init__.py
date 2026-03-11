@@ -1,5 +1,5 @@
 # ingestor/__init__.py
-# Shared data contracts and config loader for The Kinetic Ingestor.
+# Shared data contracts for The Kinetic Ingestor.
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+# Re-export config functions for backward compatibility
+from ingestor.config import load_config, save_config
 
 
 # ---------------------------------------------------------------------------
@@ -75,55 +76,3 @@ class Chunk:
     confidence_score: float = 0.0
     corrections_ref: str | None = None   # corrections.json record_id, if edited
 
-
-# ---------------------------------------------------------------------------
-# Config loader
-# ---------------------------------------------------------------------------
-
-_REQUIRED_KEYS: list[tuple[str, ...]] = [
-    ("ollama", "endpoint"),
-    ("ollama", "model"),
-    ("ollama", "fallback_model"),
-    ("ollama", "timeout_seconds"),
-    ("extraction", "engine"),
-    ("extraction", "confidence_threshold"),
-    ("chunking", "split_levels"),
-    ("chunking", "min_chunk_tokens"),
-    ("chunking", "max_chunk_tokens"),
-    ("output", "processed_root"),
-    ("output", "manifest_filename"),
-    ("output", "corrections_filename"),
-    ("hitl", "auto_accept_above"),
-    ("hitl", "show_raw_markdown"),
-]
-
-
-def load_config(config_path: Path | str = "config.yaml") -> dict[str, Any]:
-    """
-    Read and validate config.yaml.
-
-    Raises:
-        FileNotFoundError: if the config file does not exist.
-        ValueError: if any required key is missing from the config.
-    """
-    config_path = Path(config_path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path.resolve()}")
-
-    with config_path.open("r", encoding="utf-8") as fh:
-        config = yaml.safe_load(fh)
-
-    if not isinstance(config, dict):
-        raise ValueError(f"Config file {config_path} is empty or not a YAML mapping.")
-
-    for key_path in _REQUIRED_KEYS:
-        node = config
-        for part in key_path:
-            if not isinstance(node, dict) or part not in node:
-                dotted = ".".join(key_path)
-                raise ValueError(
-                    f"Missing required config key '{dotted}' in {config_path}."
-                )
-            node = node[part]
-
-    return config

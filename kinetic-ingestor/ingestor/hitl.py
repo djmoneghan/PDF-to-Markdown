@@ -10,7 +10,25 @@ from typing import Any
 
 import yaml
 
+from ingestor.hitl_base import HitlReviewBackend
+
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# CLI HITL Backend (Rich + Prompt Toolkit)
+# ---------------------------------------------------------------------------
+
+class CliHitlReview(HitlReviewBackend):
+    """
+    CLI-based HITL implementation using Rich + Prompt Toolkit.
+    
+    This is the default HITL backend for terminal/CLI usage.
+    """
+
+    def review(self, chunks: list[Any], config: dict[str, Any]) -> list[Any]:
+        """Present chunks for review in the terminal. See run_review() for details."""
+        return run_review(chunks, config)
 
 
 # ---------------------------------------------------------------------------
