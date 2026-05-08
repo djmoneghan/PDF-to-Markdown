@@ -432,6 +432,94 @@ class TestCallInferenceShape(_HealthBypassMixin, unittest.TestCase):
                     "p", "m", "http://localhost:8080", 10, "summary"
                 )
 
+    def test_max_tokens_per_field(self):
+        """Each field's budget is generous enough to fit a reasoning preamble."""
+        for field, expected_floor in [
+            ("summary", 1024), ("confidence_score", 512),
+            ("topic_category", 512), ("technical_level", 256),
+        ]:
+            with patch("ingestor.metadata.httpx.post",
+                       return_value=self._post_response("ok")) as mock_post:
+                metadata_module._call_inference(
+                    "p", "m", "http://localhost:8080", 10, field
+                )
+            payload = mock_post.call_args.kwargs["json"]
+            self.assertGreaterEqual(
+                payload["max_tokens"], expected_floor,
+                f"{field} budget too tight: {payload['max_tokens']}",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-preamble stripping — Gemma 4 31B emits <|channel>thought ...
+# <channel|>answer; the answer is everything after the closer.
+# ---------------------------------------------------------------------------
+
+class TestStripReasoning(unittest.TestCase):
+
+    def test_extracts_answer_after_closer(self):
+        raw = (
+            "<|channel>thought\nThe user wants me to respond with OK.\n"
+            "    *   Word: OK.\n<channel|>OK"
+        )
+        self.assertEqual(metadata_module._strip_reasoning(raw), "OK")
+
+    def test_multiline_answer_preserved(self):
+        raw = "<|channel>thought\nReasoning…<channel|>This is\nthe summary."
+        self.assertEqual(metadata_module._strip_reasoning(raw), "This is\nthe summary.")
+
+    def test_truncated_mid_reasoning_returns_empty(self):
+        # max_tokens hit before <channel|> — don't try to salvage; let the
+        # caller's parser fall back to its default.
+        raw = "<|channel>thought\nThe user wants me to rate the extraction"
+        self.assertEqual(metadata_module._strip_reasoning(raw), "")
+
+    def test_response_without_reasoning_passthrough(self):
+        # If the model ever emits a clean answer (no reasoning markers),
+        # _strip_reasoning is a no-op apart from whitespace trimming.
+        self.assertEqual(metadata_module._strip_reasoning("  Reactor Design  "),
+                         "Reactor Design")
+
+    def test_classification_decimal_extracted(self):
+        # End-to-end shape observed during the live smoke probe.
+        raw = (
+            "<|channel>thought\n*   Task: Rate extraction quality 0.0–1.0.\n"
+            "    *   Content: clean technical paragraph.\n"
+            "    *   Rating: 0.85.<channel|>0.85"
+        )
+        self.assertEqual(metadata_module._strip_reasoning(raw), "0.85")
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: a reasoning-prefixed response should still parse correctly.
+# ---------------------------------------------------------------------------
+
+class TestReasoningPreambleEndToEnd(_HealthBypassMixin, unittest.TestCase):
+    """Confirm generate_metadata() handles the orchestrator's wrapped output."""
+
+    def _post_response(self, content_text: str):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value={
+            "choices": [{"message": {"content": content_text}}]
+        })
+        return resp
+
+    def test_classification_works_through_reasoning_wrapper(self):
+        responses = [
+            self._post_response("<|channel>thought\nReasoning…<channel|>A clean summary."),
+            self._post_response("<|channel>thought\nRating analysis…<channel|>0.87"),
+            self._post_response("<|channel>thought\nCategory analysis…<channel|>Reactor Design"),
+            self._post_response("<|channel>thought\nLevel analysis…<channel|>Specialist"),
+        ]
+        with patch("ingestor.metadata.httpx.post", side_effect=responses):
+            meta = generate_metadata(_make_chunk(), _BASE_CONFIG)
+        self.assertEqual(meta["summary"], "A clean summary.")
+        self.assertAlmostEqual(meta["confidence_score"], 0.87, places=2)
+        self.assertEqual(meta["topic_category"], "Reactor Design")
+        self.assertEqual(meta["technical_level"], "Specialist")
+
 
 if __name__ == "__main__":
     unittest.main()

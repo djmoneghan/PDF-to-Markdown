@@ -55,13 +55,30 @@ _REQUIRED_FIELDS: list[str] = [
 # Per-session health-check cache (endpoint -> checked)
 _checked_endpoints: set[str] = set()
 
-# Field-specific token budgets — keep tight so the model returns just the answer.
+# Field-specific token budgets. Generous because Puck's Gemma 4 31B
+# checkpoint emits an extended-thinking preamble before the final answer;
+# the budget must cover (reasoning tokens) + (answer tokens) or the
+# response truncates mid-reasoning and `_strip_reasoning` returns the raw
+# preamble. ~80–280 tokens of reasoning observed on classification prompts.
 _MAX_TOKENS = {
-    "summary": 200,
-    "confidence_score": 16,
-    "topic_category": 32,
-    "technical_level": 8,
+    "summary": 1024,
+    "confidence_score": 512,
+    "topic_category": 512,
+    "technical_level": 256,
 }
+
+# Marker the orchestrator's Gemma checkpoint emits between its reasoning
+# preamble and the final answer:
+#
+#   <|channel>thought\n
+#   *   <reasoning bullets>
+#   ...
+#   <channel|><actual answer>
+#
+# Note the differently-placed pipe between opener and closer — that is the
+# format the model produces, not a typo.
+_REASONING_OPENER = "<|channel>thought"
+_REASONING_CLOSER = "<channel|>"
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +364,7 @@ def _call_inference(
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": _MAX_TOKENS.get(field_name, 256),
+        "max_tokens": _MAX_TOKENS.get(field_name, 1024),
         "temperature": 0.0,
         "stream": False,
     }
@@ -355,11 +372,34 @@ def _call_inference(
     resp.raise_for_status()
     body = resp.json()
     try:
-        return body["choices"][0]["message"]["content"]
+        raw = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise ValueError(
             f"Inference response missing choices[0].message.content: {body!r}"
         ) from exc
+    return _strip_reasoning(raw)
+
+
+def _strip_reasoning(text: str) -> str:
+    """Strip Gemma's thinking-channel preamble.
+
+    The orchestrator's Gemma 4 31B checkpoint emits an extended-thinking
+    section prefixed with ``<|channel>thought\\n`` and signals the final
+    answer with ``<channel|>`` (note the differently-placed pipe — that
+    is the format the model produces).
+
+    Returns everything after the first ``<channel|>`` if present;
+    otherwise strips a leading ``<|channel>thought`` block conservatively
+    by dropping it if it stands alone, otherwise returns the input
+    unchanged. Always strips surrounding whitespace.
+    """
+    if _REASONING_CLOSER in text:
+        return text.split(_REASONING_CLOSER, 1)[1].strip()
+    # Truncated mid-reasoning (no closer reached): don't try to salvage —
+    # let downstream parsers fall back to defaults rather than guessing.
+    if text.lstrip().startswith(_REASONING_OPENER):
+        return ""
+    return text.strip()
 
 
 def _parse_float(raw: str, chunk_id: str) -> float:
