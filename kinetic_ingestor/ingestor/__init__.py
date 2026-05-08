@@ -77,6 +77,45 @@ class Chunk:
 
 
 # ---------------------------------------------------------------------------
+# Config objects (used by pipeline modules; distinct from load_config dict)
+# ---------------------------------------------------------------------------
+
+class OllamaConfig:
+    def __init__(self, endpoint: str, model: str, fallback_model: str, timeout: int):
+        self.endpoint = endpoint
+        self.model = model
+        self.fallback_model = fallback_model
+        self.timeout_seconds = timeout
+
+
+class Config:
+    """Typed config wrapper consumed by pipeline modules (extractor, metadata, etc.)."""
+
+    def __init__(self, ollama: OllamaConfig, **sections: Any):
+        self.ollama = ollama
+        for key, val in sections.items():
+            setattr(self, key, val)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Config":
+        ollama_dict = d.get("ollama", {})
+        ollama = OllamaConfig(
+            endpoint=ollama_dict.get("endpoint", ""),
+            model=ollama_dict.get("model", ""),
+            fallback_model=ollama_dict.get("fallback_model", ""),
+            # Accept either "timeout" (test fixture key) or "timeout_seconds" (yaml key)
+            timeout=ollama_dict.get("timeout", ollama_dict.get("timeout_seconds", 0)),
+        )
+        return cls(
+            ollama,
+            extraction=d.get("extraction", {}),
+            chunking=d.get("chunking", {}),
+            output=d.get("output", {}),
+            hitl=d.get("hitl", {}),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Config loader
 # ---------------------------------------------------------------------------
 

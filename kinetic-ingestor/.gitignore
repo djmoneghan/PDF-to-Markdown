@@ -1,8 +1,0 @@
-processed/
-__pycache__/
-.venv/
-*.pyc
-*.pyo
-*.pyd
-manifest.json
-corrections.json

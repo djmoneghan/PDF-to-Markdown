@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Any
+from ingestor import Chunk
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("ingestor.metadata")
+log.setLevel(logging.DEBUG)
 
 # ---------------------------------------------------------------------------
 # Controlled vocabularies (AC-3.4, AC-3.5)
@@ -63,60 +66,48 @@ class MetadataGenerationError(Exception):
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def generate_metadata(chunk: Any, config: dict[str, Any]) -> dict[str, Any]:
-    """Generate YAML frontmatter metadata for a Chunk via the local Ollama endpoint.
+def generate_metadata(chunk: Chunk, config: dict) -> dict:
+    """
+    Generate metadata for a single chunk via 4 sequential Ollama calls.
 
-    Issues four separate Ollama calls (AC-3.6):
-      1. summary
-      2. confidence_score
-      3. topic_category
-      4. technical_level
-
-    Args:
-        chunk:  Chunk object produced by ingestor.chunker.chunk().
-        config: dict loaded by ingestor.load_config().
-
-    Returns:
-        dict conforming to the YAML frontmatter schema in CLAUDE.md (AC-3.8).
+    Populates chunk.metadata and chunk.confidence_score in-place and returns
+    the complete metadata dict.
 
     Raises:
-        ConnectionError: if the Ollama health check fails (AC-3.1).
-        MetadataGenerationError: if any field times out on both attempts (AC-3.7).
+        ConnectionError: if Ollama endpoint is unreachable.
+        MetadataGenerationError: if a field times out twice (primary + fallback).
     """
-    endpoint: str = config["ollama"]["endpoint"]
-    model: str    = config["ollama"]["model"]
-    timeout: int  = int(config["ollama"]["timeout_seconds"])
+    endpoint = config["ollama"]["endpoint"]
+    model = config["ollama"]["model"]
+    fallback_model = config["ollama"]["fallback_model"]
+    timeout = config["ollama"]["timeout_seconds"]
 
-    # AC-3.1 — health check once per endpoint per session
     _ensure_ollama_health(endpoint)
 
-    content = chunk.content
+    summary = _gen_summary(chunk.content, model, fallback_model, endpoint, timeout, chunk.chunk_id)
+    confidence = _gen_confidence(chunk.content, model, fallback_model, endpoint, timeout, chunk.chunk_id)
+    topic = _gen_topic_category(chunk.content, model, fallback_model, endpoint, timeout, chunk.chunk_id)
+    level = _gen_technical_level(chunk.content, model, fallback_model, endpoint, timeout, chunk.chunk_id)
 
-    # AC-3.6 — four separate calls, never combined
-    summary          = _gen_summary(content, model, endpoint, timeout, chunk.chunk_id)
-    confidence_score = _gen_confidence(content, model, endpoint, timeout, chunk.chunk_id)
-    topic_category   = _gen_topic_category(content, model, endpoint, timeout, chunk.chunk_id)
-    technical_level  = _gen_technical_level(content, model, endpoint, timeout, chunk.chunk_id)
-
-    metadata: dict[str, Any] = {
-        "source_id":        chunk.source_id,
-        "source_file":      chunk.source_file,
-        "chunk_id":         chunk.chunk_id,
-        "page_range":       chunk.page_range,
-        "breadcrumb":       chunk.breadcrumb,
-        "parent_header":    chunk.parent_header,
-        "topic_category":   topic_category,
-        "technical_level":  technical_level,
-        "summary":          summary,
-        "confidence_score": confidence_score,
+    meta = {
+        "source_id": chunk.source_id,
+        "source_file": chunk.source_file,
+        "chunk_id": chunk.chunk_id,
+        "page_range": chunk.page_range,
+        "breadcrumb": chunk.breadcrumb,
+        "parent_header": chunk.parent_header,
+        "topic_category": topic,
+        "technical_level": level,
+        "summary": summary,
+        "confidence_score": confidence,
         "extraction_engine": chunk.extraction_engine,
-        "hitl_status":      chunk.hitl_status,
-        "corrections_ref":  chunk.corrections_ref,
+        "hitl_status": chunk.hitl_status,
+        "corrections_ref": chunk.corrections_ref,
     }
-
-    # AC-3.8 — validate schema completeness before returning
-    _validate_schema(metadata)
-    return metadata
+    _validate_schema(meta)
+    chunk.metadata = meta
+    chunk.confidence_score = confidence
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +135,12 @@ def _ensure_ollama_health(endpoint: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _gen_summary(
-    content: str, model: str, endpoint: str, timeout: int, chunk_id: str
+    content: str,
+    model: str,
+    fallback_model: str,
+    endpoint: str,
+    timeout: int,
+    chunk_id: str,
 ) -> str:
     """AC-3.2 — generate 1-2 sentence summary; truncate at sentence boundary ≤300 chars."""
     prompt = (
@@ -157,7 +153,9 @@ def _gen_summary(
     )
     raw = _call_with_retry(
         lambda: _call_ollama(prompt, model, endpoint, timeout),
-        chunk_id, "summary",
+        lambda: _call_ollama(prompt, fallback_model, endpoint, timeout),
+        chunk_id,
+        "summary",
     )
     text = raw.strip()
     if len(text) > 300:
@@ -166,13 +164,19 @@ def _gen_summary(
         text = truncated[: last_period + 1] if last_period > 0 else truncated
         log.warning(
             "Summary for %r truncated to %d chars at sentence boundary.",
-            chunk_id, len(text),
+            chunk_id,
+            len(text),
         )
     return text
 
 
 def _gen_confidence(
-    content: str, model: str, endpoint: str, timeout: int, chunk_id: str
+    content: str,
+    model: str,
+    fallback_model: str,
+    endpoint: str,
+    timeout: int,
+    chunk_id: str,
 ) -> float:
     """AC-3.3 — self-assessed extraction quality score 0.0–1.0."""
     prompt = (
@@ -184,13 +188,20 @@ def _gen_confidence(
     )
     raw = _call_with_retry(
         lambda: _call_ollama(prompt, model, endpoint, timeout),
-        chunk_id, "confidence_score",
+        lambda: _call_ollama(prompt, fallback_model, endpoint, timeout),
+        chunk_id,
+        "confidence_score",
     )
     return _parse_float(raw.strip(), chunk_id)
 
 
 def _gen_topic_category(
-    content: str, model: str, endpoint: str, timeout: int, chunk_id: str
+    content: str,
+    model: str,
+    fallback_model: str,
+    endpoint: str,
+    timeout: int,
+    chunk_id: str,
 ) -> str:
     """AC-3.4 — classify into controlled topic_category vocabulary."""
     categories_block = "\n".join(f"- {c}" for c in TOPIC_CATEGORIES)
@@ -202,14 +213,22 @@ def _gen_topic_category(
     )
     raw = _call_with_retry(
         lambda: _call_ollama(prompt, model, endpoint, timeout),
-        chunk_id, "topic_category",
+        lambda: _call_ollama(prompt, fallback_model, endpoint, timeout),
+        chunk_id,
+        "topic_category",
     )
-    return _match_vocabulary(raw.strip(), TOPIC_CATEGORIES, "General Reference",
-                             "topic_category", chunk_id)
+    return _match_vocabulary(
+        raw.strip(), TOPIC_CATEGORIES, "General Reference", "topic_category", chunk_id
+    )
 
 
 def _gen_technical_level(
-    content: str, model: str, endpoint: str, timeout: int, chunk_id: str
+    content: str,
+    model: str,
+    fallback_model: str,
+    endpoint: str,
+    timeout: int,
+    chunk_id: str,
 ) -> str:
     """AC-3.5 — classify into controlled technical_level vocabulary."""
     prompt = (
@@ -222,32 +241,57 @@ def _gen_technical_level(
     )
     raw = _call_with_retry(
         lambda: _call_ollama(prompt, model, endpoint, timeout),
-        chunk_id, "technical_level",
+        lambda: _call_ollama(prompt, fallback_model, endpoint, timeout),
+        chunk_id,
+        "technical_level",
     )
     # DECISION REQUIRED: spec does not specify a default for technical_level on
     # non-conforming response (only AC-3.4 explicitly names "General Reference").
     # Using "Specialist" as the default — revisit if a different default is required.
-    return _match_vocabulary(raw.strip(), TECHNICAL_LEVELS, "Specialist",
-                             "technical_level", chunk_id)
+    return _match_vocabulary(
+        raw.strip(), TECHNICAL_LEVELS, "Specialist", "technical_level", chunk_id
+    )
 
 
 # ---------------------------------------------------------------------------
-# AC-3.7 — retry wrapper
+# AC-3.7 — Retry wrapper with fallback model
 # ---------------------------------------------------------------------------
 
-def _call_with_retry(fn: Any, chunk_id: str, field_name: str) -> str:
-    """Call fn(); retry once on timeout. Raises MetadataGenerationError after two failures."""
+def _call_with_retry(
+    primary_fn: Any,
+    fallback_fn: Any,
+    chunk_id: str,
+    field_name: str,
+) -> str:
+    """
+    Call primary_fn(); on timeout retry once with fallback_fn().
+    Logs model, latency, and fallback status for each attempt.
+    Raises MetadataGenerationError after two consecutive timeouts.
+    """
+    t0 = time.monotonic()
     try:
-        return fn()
+        result = primary_fn()
+        log.info(
+            "Ollama [%s] chunk=%r model=primary latency=%.0fms",
+            field_name, chunk_id, (time.monotonic() - t0) * 1000,
+        )
+        return result
     except Exception as exc:
         if not _is_timeout(exc):
             raise
         log.warning(
-            "Ollama timed out on first attempt for %r field %r — retrying.",
+            "Ollama timed out (primary) for chunk %r field %r — retrying with fallback model.",
             chunk_id, field_name,
         )
+
+    t0 = time.monotonic()
     try:
-        return fn()
+        result = fallback_fn()
+        log.info(
+            "Ollama [%s] chunk=%r model=fallback latency=%.0fms",
+            field_name, chunk_id, (time.monotonic() - t0) * 1000,
+        )
+        return result
     except Exception as exc2:
         if _is_timeout(exc2):
             raise MetadataGenerationError(
@@ -259,12 +303,12 @@ def _call_with_retry(fn: Any, chunk_id: str, field_name: str) -> str:
 def _is_timeout(exc: Exception) -> bool:
     """Heuristic: treat any exception whose type name or message suggests a timeout."""
     name = type(exc).__name__.lower()
-    msg  = str(exc).lower()
+    msg = str(exc).lower()
     return "timeout" in name or "timed out" in msg or "timeout" in msg
 
 
 # ---------------------------------------------------------------------------
-# AC-3.8 — schema validation
+# AC-3.8 — Schema validation
 # ---------------------------------------------------------------------------
 
 def _validate_schema(metadata: dict[str, Any]) -> None:
@@ -305,7 +349,8 @@ def _parse_float(raw: str, chunk_id: str) -> float:
             pass
     log.warning(
         "Could not parse confidence_score from %r for chunk %r. Defaulting to 0.5.",
-        raw, chunk_id,
+        raw,
+        chunk_id,
     )
     return 0.5
 
@@ -318,16 +363,17 @@ def _match_vocabulary(
     chunk_id: str,
 ) -> str:
     """Return the vocabulary entry that matches raw (case-insensitive); default otherwise."""
-    # Exact match
     if raw in vocabulary:
         return raw
-    # Case-insensitive match
     raw_lower = raw.lower()
     for entry in vocabulary:
         if entry.lower() == raw_lower:
             return entry
     log.warning(
         "LLM returned non-conforming %s %r for chunk %r. Defaulting to %r.",
-        field_name, raw, chunk_id, default,
+        field_name,
+        raw,
+        chunk_id,
+        default,
     )
     return default
