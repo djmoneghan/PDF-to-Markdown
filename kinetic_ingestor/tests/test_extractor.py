@@ -179,13 +179,18 @@ class TestAC11_DoclingPrimaryPath(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestAC12_TableToGFM(unittest.TestCase):
-    """AC-1.2 — Detected tables are converted to GFM; failed tables raise ExtractionWarning."""
+    """AC-1.2 — Detected tables are converted to GFM; failed tables soft-skip
+    with a visible HITL marker rather than aborting the whole document."""
 
     def setUp(self):
         self.pdf = _tmp_pdf()
 
     def tearDown(self):
         self.pdf.unlink(missing_ok=True)
+
+    def _doc_text(self, doc):
+        """Concatenate all page markdown so tests can search across pages."""
+        return "\n".join(md for _page, md in doc.pages)
 
     def test_table_rendered_as_gfm(self):
         sys_mocks, dc_mod, label = _make_docling_sys_mocks()
@@ -199,42 +204,65 @@ class TestAC12_TableToGFM(unittest.TestCase):
         self.assertEqual(len(doc.tables), 1)
         self.assertIn("|", doc.tables[0].gfm)
 
-    def test_failed_table_raises_extraction_warning(self):
+    def test_failed_table_does_not_abort_extraction(self):
         sys_mocks, dc_mod, label = _make_docling_sys_mocks()
         tbl = _make_item("", page_no=1, label_val=label.TABLE)
         tbl.export_to_markdown.side_effect = RuntimeError("parse failure")
         _wire_converter(dc_mod, [tbl])
 
         with patch.dict(sys.modules, sys_mocks):
-            with self.assertRaises(ExtractionWarning):
+            # Must NOT raise — extractor soft-skips and continues.
+            doc = extract(self.pdf, _docling_config())
+
+        # The table was skipped, so doc.tables is empty…
+        self.assertEqual(len(doc.tables), 0)
+        # …but the page content carries an "[Extraction note]" marker.
+        text = self._doc_text(doc)
+        self.assertIn("[Extraction note]", text)
+
+    def test_failed_table_logs_warning(self):
+        sys_mocks, dc_mod, label = _make_docling_sys_mocks()
+        tbl = _make_item("", page_no=1, label_val=label.TABLE)
+        tbl.export_to_markdown.side_effect = RuntimeError("parse failure")
+        _wire_converter(dc_mod, [tbl])
+
+        with patch.dict(sys.modules, sys_mocks):
+            with self.assertLogs("ingestor.extractor", level="WARNING") as cm:
                 extract(self.pdf, _docling_config())
 
-    def test_extraction_warning_contains_page_and_index(self):
+        self.assertTrue(
+            any("table" in msg.lower() and "skipped" in msg.lower() for msg in cm.output),
+            f"Expected a table-skipped WARNING; got {cm.output!r}",
+        )
+
+    def test_failed_table_marker_contains_page_and_index(self):
         sys_mocks, dc_mod, label = _make_docling_sys_mocks()
         tbl = _make_item("", page_no=3, label_val=label.TABLE)
         tbl.export_to_markdown.side_effect = ValueError("bad table")
         _wire_converter(dc_mod, [tbl])
 
         with patch.dict(sys.modules, sys_mocks):
-            try:
-                extract(self.pdf, _docling_config())
-                self.fail("Expected ExtractionWarning")
-            except ExtractionWarning as exc:
-                msg = str(exc)
-                self.assertIn("page 3", msg)
-                self.assertIn("index 0", msg)
+            doc = extract(self.pdf, _docling_config())
+
+        text = self._doc_text(doc)
+        self.assertIn("[Extraction note]", text)
+        self.assertIn("page 3", text)
+        self.assertIn("index 0", text)
 
     def test_no_raw_text_emitted_for_failed_table(self):
-        """ExtractionWarning is raised rather than silently emitting plain text."""
+        """The marker replaces the table — raw item.text is NOT leaked into prose."""
         sys_mocks, dc_mod, label = _make_docling_sys_mocks()
         tbl = _make_item("fallback plain text", page_no=1, label_val=label.TABLE)
         tbl.export_to_markdown.side_effect = Exception("fail")
         _wire_converter(dc_mod, [tbl])
 
         with patch.dict(sys.modules, sys_mocks):
-            # Must raise — no fallback plain-text emission
-            with self.assertRaises(ExtractionWarning):
-                extract(self.pdf, _docling_config())
+            doc = extract(self.pdf, _docling_config())
+
+        text = self._doc_text(doc)
+        self.assertIn("[Extraction note]", text)
+        self.assertNotIn("fallback plain text", text)
+        self.assertEqual(len(doc.tables), 0)
 
 
 # ---------------------------------------------------------------------------

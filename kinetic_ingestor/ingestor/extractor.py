@@ -51,7 +51,17 @@ def extract(doc_path: Path | str, config: dict[str, Any]) -> DocumentContent:
             supported document type (AC-1.6).
         ExtractionError: if DOCX is requested but Docling is unavailable,
             or both engines fail on a PDF.
-        ExtractionWarning: if a table cannot be converted to GFM (AC-1.2).
+
+    Notes:
+        Tables that Docling cannot convert to GFM (AC-1.2) are soft-skipped:
+        a visible "[Extraction note]" marker is inserted into the page
+        content for downstream HITL review, a WARNING is logged, and the
+        rest of the document continues to extract. Hard-failing on a single
+        bad table is too brittle in practice — most real documents have at
+        least one quirky table, and aborting throws away all the good
+        content. ``ExtractionWarning`` is retained as a public class for
+        callers that want to filter logs or handle markers specifically,
+        but ``extract()`` no longer raises it.
     """
     doc_path = Path(doc_path)
 
@@ -174,13 +184,22 @@ def _extract_docling(doc_path: Path, config: dict[str, Any]) -> tuple[DocumentCo
                 gfm = item.export_to_markdown()
                 if not gfm or not gfm.strip():
                     raise ValueError("Docling returned empty GFM for this table.")
-            except ExtractionWarning:
-                raise
             except Exception as exc:
-                raise ExtractionWarning(
-                    f"Table at page {page_no}, index {idx} could not be parsed to GFM: "
-                    f"{exc}. Manual review required."
-                ) from exc
+                # Soft-skip: insert a visible HITL marker and continue. The
+                # raw `item.text` is intentionally NOT emitted as a fallback —
+                # silently leaking unstructured table cells into prose would
+                # be worse than a missing-table marker.
+                marker = (
+                    f"\n> **[Extraction note]** Docling could not produce GFM for the "
+                    f"table at page {page_no}, index {idx} "
+                    f"({type(exc).__name__}: {exc}). Manual review required.\n"
+                )
+                log.warning(
+                    "Table at page %d, index %d skipped (Docling export failed): %s",
+                    page_no, idx, exc,
+                )
+                pages_content[page_no].append(marker)
+                continue
             tables.append(TableBlock(gfm=gfm, page=page_no, table_index=idx))
             pages_content[page_no].append(gfm)
 
