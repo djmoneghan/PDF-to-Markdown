@@ -99,11 +99,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--base-model",
-        default="qwen3:8b",
+        default="llama3.1:8b",
         dest="base_model",
         help=(
             "Base Ollama model name for the generated Modelfile "
-            "(default: qwen3:8b). Used only with --export-dataset."
+            "(default: llama3.1:8b). Used only with --export-dataset; the "
+            "Modelfile is consumed by an Ollama fine-tuning workflow that is "
+            "separate from KI's own metadata-generation backend."
         ),
     )
     parser.add_argument(
@@ -217,11 +219,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     console.print(f"  Produced {len(chunks)} chunk(s).")
 
     # ------------------------------------------------------------------
-    # Stage 4 — metadata generation (Ollama)
+    # Stage 4 — metadata generation (Puck orchestrator: Gemma 4 31B at :8080)
     # ------------------------------------------------------------------
     from ingestor.metadata import generate_metadata
 
-    console.print("Generating metadata via Ollama …")
+    console.print("Generating metadata via local orchestrator …")
     for i, ch in enumerate(chunks, 1):
         try:
             meta = generate_metadata(ch, config)

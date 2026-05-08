@@ -1,8 +1,10 @@
-ollama:
-  endpoint: "http://localhost:11434"
-  model: "qwen3:8b"
-  fallback_model: "qwen3:8b"
-  timeout_seconds: 120
+# Metadata-generation inference: Puck's local Gemma 4 31B orchestrator
+# (llama-cpp-python server, OpenAI-compatible /v1/chat/completions).
+inference:
+  endpoint: "http://localhost:8080"
+  model: "gemma"
+  fallback_model: "gemma"
+  timeout_seconds: 180
 
 extraction:
   engine: "docling"          # or "pymupdf"
@@ -25,7 +27,7 @@ hitl:
 embeddings:
   enabled: true
   model: "nomic-embed-text"                  # Ollama embedding model
-  endpoint: "http://localhost:11434"         # same Ollama instance
+  endpoint: "http://localhost:11434"         # Ollama (separate from inference above)
   chroma_persist_dir: "../../workspace/chroma_db"
   collection_name: "kinetic_ingestor_chunks"
   batch_size: 10

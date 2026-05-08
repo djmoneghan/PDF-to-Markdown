@@ -80,7 +80,7 @@ class Chunk:
 # Config objects (used by pipeline modules; distinct from load_config dict)
 # ---------------------------------------------------------------------------
 
-class OllamaConfig:
+class InferenceConfig:
     def __init__(self, endpoint: str, model: str, fallback_model: str, timeout: int):
         self.endpoint = endpoint
         self.model = model
@@ -91,23 +91,23 @@ class OllamaConfig:
 class Config:
     """Typed config wrapper consumed by pipeline modules (extractor, metadata, etc.)."""
 
-    def __init__(self, ollama: OllamaConfig, **sections: Any):
-        self.ollama = ollama
+    def __init__(self, inference: InferenceConfig, **sections: Any):
+        self.inference = inference
         for key, val in sections.items():
             setattr(self, key, val)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Config":
-        ollama_dict = d.get("ollama", {})
-        ollama = OllamaConfig(
-            endpoint=ollama_dict.get("endpoint", ""),
-            model=ollama_dict.get("model", ""),
-            fallback_model=ollama_dict.get("fallback_model", ""),
+        inference_dict = d.get("inference", {})
+        inference = InferenceConfig(
+            endpoint=inference_dict.get("endpoint", ""),
+            model=inference_dict.get("model", ""),
+            fallback_model=inference_dict.get("fallback_model", ""),
             # Accept either "timeout" (test fixture key) or "timeout_seconds" (yaml key)
-            timeout=ollama_dict.get("timeout", ollama_dict.get("timeout_seconds", 0)),
+            timeout=inference_dict.get("timeout", inference_dict.get("timeout_seconds", 0)),
         )
         return cls(
-            ollama,
+            inference,
             extraction=d.get("extraction", {}),
             chunking=d.get("chunking", {}),
             output=d.get("output", {}),
@@ -120,10 +120,10 @@ class Config:
 # ---------------------------------------------------------------------------
 
 _REQUIRED_KEYS: list[tuple[str, ...]] = [
-    ("ollama", "endpoint"),
-    ("ollama", "model"),
-    ("ollama", "fallback_model"),
-    ("ollama", "timeout_seconds"),
+    ("inference", "endpoint"),
+    ("inference", "model"),
+    ("inference", "fallback_model"),
+    ("inference", "timeout_seconds"),
     ("extraction", "engine"),
     ("extraction", "confidence_threshold"),
     ("chunking", "split_levels"),

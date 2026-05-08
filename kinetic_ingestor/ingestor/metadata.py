@@ -1,14 +1,16 @@
 # ingestor/metadata.py
-# Chunk -> YAML metadata via local Ollama endpoint.
+# Chunk -> YAML metadata via Puck's local Gemma orchestrator
+# (OpenAI-compatible chat-completions API at http://localhost:8080).
 
 from __future__ import annotations
 
 import logging
 import re
 import time
-import urllib.error
-import urllib.request
 from typing import Any
+
+import httpx
+
 from ingestor import Chunk
 
 log = logging.getLogger("ingestor.metadata")
@@ -53,13 +55,21 @@ _REQUIRED_FIELDS: list[str] = [
 # Per-session health-check cache (endpoint -> checked)
 _checked_endpoints: set[str] = set()
 
+# Field-specific token budgets — keep tight so the model returns just the answer.
+_MAX_TOKENS = {
+    "summary": 200,
+    "confidence_score": 16,
+    "topic_category": 32,
+    "technical_level": 8,
+}
+
 
 # ---------------------------------------------------------------------------
 # Public exception
 # ---------------------------------------------------------------------------
 
 class MetadataGenerationError(Exception):
-    """Raised when Ollama times out twice for a given chunk / field combination."""
+    """Raised when the orchestrator times out twice for a given chunk / field combination."""
 
 
 # ---------------------------------------------------------------------------
@@ -68,21 +78,22 @@ class MetadataGenerationError(Exception):
 
 def generate_metadata(chunk: Chunk, config: dict) -> dict:
     """
-    Generate metadata for a single chunk via 4 sequential Ollama calls.
+    Generate metadata for a single chunk via 4 sequential orchestrator calls.
 
     Populates chunk.metadata and chunk.confidence_score in-place and returns
     the complete metadata dict.
 
     Raises:
-        ConnectionError: if Ollama endpoint is unreachable.
+        ConnectionError: if the orchestrator endpoint is unreachable.
         MetadataGenerationError: if a field times out twice (primary + fallback).
     """
-    endpoint = config["ollama"]["endpoint"]
-    model = config["ollama"]["model"]
-    fallback_model = config["ollama"]["fallback_model"]
-    timeout = config["ollama"]["timeout_seconds"]
+    inference = config["inference"]
+    endpoint = inference["endpoint"]
+    model = inference["model"]
+    fallback_model = inference["fallback_model"]
+    timeout = inference["timeout_seconds"]
 
-    _ensure_ollama_health(endpoint)
+    _ensure_inference_health(endpoint)
 
     summary = _gen_summary(chunk.content, model, fallback_model, endpoint, timeout, chunk.chunk_id)
     confidence = _gen_confidence(chunk.content, model, fallback_model, endpoint, timeout, chunk.chunk_id)
@@ -111,27 +122,26 @@ def generate_metadata(chunk: Chunk, config: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# AC-3.1 — Ollama health check
+# AC-3.1 — Orchestrator health check
 # ---------------------------------------------------------------------------
 
-def _ensure_ollama_health(endpoint: str) -> None:
-    """Check Ollama reachability once per endpoint per process session."""
+def _ensure_inference_health(endpoint: str) -> None:
+    """Check orchestrator reachability once per endpoint per process session."""
     if endpoint in _checked_endpoints:
         return
-    url = f"{endpoint}/api/tags"
+    url = f"{endpoint.rstrip('/')}/health"
     try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            resp.read()
-    except (urllib.error.URLError, OSError, Exception) as exc:
+        resp = httpx.get(url, timeout=5)
+        resp.raise_for_status()
+    except Exception as exc:
         raise ConnectionError(
-            f"Ollama endpoint unreachable at {url}: {exc}"
+            f"Inference endpoint unreachable at {url}: {exc}"
         ) from exc
     _checked_endpoints.add(endpoint)
 
 
 # ---------------------------------------------------------------------------
-# Per-field generators (AC-3.2 – AC-3.5, each a separate Ollama call)
+# Per-field generators (AC-3.2 – AC-3.5, each a separate orchestrator call)
 # ---------------------------------------------------------------------------
 
 def _gen_summary(
@@ -152,8 +162,8 @@ def _gen_summary(
         "Summary (1–2 sentences only):"
     )
     raw = _call_with_retry(
-        lambda: _call_ollama(prompt, model, endpoint, timeout),
-        lambda: _call_ollama(prompt, fallback_model, endpoint, timeout),
+        lambda: _call_inference(prompt, model, endpoint, timeout, "summary"),
+        lambda: _call_inference(prompt, fallback_model, endpoint, timeout, "summary"),
         chunk_id,
         "summary",
     )
@@ -187,8 +197,8 @@ def _gen_confidence(
         "Respond with ONLY a single decimal number between 0.0 and 1.0 (e.g. 0.85):"
     )
     raw = _call_with_retry(
-        lambda: _call_ollama(prompt, model, endpoint, timeout),
-        lambda: _call_ollama(prompt, fallback_model, endpoint, timeout),
+        lambda: _call_inference(prompt, model, endpoint, timeout, "confidence_score"),
+        lambda: _call_inference(prompt, fallback_model, endpoint, timeout, "confidence_score"),
         chunk_id,
         "confidence_score",
     )
@@ -212,8 +222,8 @@ def _gen_topic_category(
         "Respond with ONLY the category name, exactly as written above:"
     )
     raw = _call_with_retry(
-        lambda: _call_ollama(prompt, model, endpoint, timeout),
-        lambda: _call_ollama(prompt, fallback_model, endpoint, timeout),
+        lambda: _call_inference(prompt, model, endpoint, timeout, "topic_category"),
+        lambda: _call_inference(prompt, fallback_model, endpoint, timeout, "topic_category"),
         chunk_id,
         "topic_category",
     )
@@ -240,8 +250,8 @@ def _gen_technical_level(
         "Respond with ONLY one word: Executive, Specialist, or PhD:"
     )
     raw = _call_with_retry(
-        lambda: _call_ollama(prompt, model, endpoint, timeout),
-        lambda: _call_ollama(prompt, fallback_model, endpoint, timeout),
+        lambda: _call_inference(prompt, model, endpoint, timeout, "technical_level"),
+        lambda: _call_inference(prompt, fallback_model, endpoint, timeout, "technical_level"),
         chunk_id,
         "technical_level",
     )
@@ -272,7 +282,7 @@ def _call_with_retry(
     try:
         result = primary_fn()
         log.info(
-            "Ollama [%s] chunk=%r model=primary latency=%.0fms",
+            "Inference [%s] chunk=%r model=primary latency=%.0fms",
             field_name, chunk_id, (time.monotonic() - t0) * 1000,
         )
         return result
@@ -280,7 +290,7 @@ def _call_with_retry(
         if not _is_timeout(exc):
             raise
         log.warning(
-            "Ollama timed out (primary) for chunk %r field %r — retrying with fallback model.",
+            "Inference timed out (primary) for chunk %r field %r — retrying with fallback model.",
             chunk_id, field_name,
         )
 
@@ -288,14 +298,14 @@ def _call_with_retry(
     try:
         result = fallback_fn()
         log.info(
-            "Ollama [%s] chunk=%r model=fallback latency=%.0fms",
+            "Inference [%s] chunk=%r model=fallback latency=%.0fms",
             field_name, chunk_id, (time.monotonic() - t0) * 1000,
         )
         return result
     except Exception as exc2:
         if _is_timeout(exc2):
             raise MetadataGenerationError(
-                f"Ollama timed out twice for chunk {chunk_id!r}, field {field_name!r}."
+                f"Inference timed out twice for chunk {chunk_id!r}, field {field_name!r}."
             ) from exc2
         raise
 
@@ -325,17 +335,31 @@ def _validate_schema(metadata: dict[str, Any]) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _call_ollama(prompt: str, model: str, endpoint: str, timeout_sec: int) -> str:
-    """Issue a single generate call to the Ollama Python client."""
-    import ollama as _ollama  # imported lazily so the module loads without Ollama installed
-
-    client = _ollama.Client(host=endpoint, timeout=timeout_sec)
-    resp = client.generate(model=model, prompt=prompt)
-
-    # Handle both object (new API) and dict (old API) response shapes
-    if isinstance(resp, dict):
-        return resp.get("response", "")
-    return getattr(resp, "response", str(resp))
+def _call_inference(
+    prompt: str,
+    model: str,
+    endpoint: str,
+    timeout_sec: int,
+    field_name: str,
+) -> str:
+    """Issue a single chat-completion call to the orchestrator (OpenAI-compatible)."""
+    url = f"{endpoint.rstrip('/')}/v1/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": _MAX_TOKENS.get(field_name, 256),
+        "temperature": 0.0,
+        "stream": False,
+    }
+    resp = httpx.post(url, json=payload, timeout=timeout_sec)
+    resp.raise_for_status()
+    body = resp.json()
+    try:
+        return body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ValueError(
+            f"Inference response missing choices[0].message.content: {body!r}"
+        ) from exc
 
 
 def _parse_float(raw: str, chunk_id: str) -> float:

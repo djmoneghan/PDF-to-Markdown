@@ -35,20 +35,20 @@ class TestLoadConfigHappyPath(unittest.TestCase):
     def test_returns_dict(self):
         self.assertIsInstance(self.cfg, dict)
 
-    # ollama section
-    def test_ollama_endpoint_is_localhost(self):
-        self.assertEqual(self.cfg["ollama"]["endpoint"], "http://localhost:11434")
+    # inference section (Puck orchestrator)
+    def test_inference_endpoint_is_orchestrator(self):
+        self.assertEqual(self.cfg["inference"]["endpoint"], "http://localhost:8080")
 
-    def test_ollama_model_present(self):
-        self.assertIsInstance(self.cfg["ollama"]["model"], str)
-        self.assertTrue(len(self.cfg["ollama"]["model"]) > 0)
+    def test_inference_model_present(self):
+        self.assertIsInstance(self.cfg["inference"]["model"], str)
+        self.assertTrue(len(self.cfg["inference"]["model"]) > 0)
 
-    def test_ollama_fallback_model_present(self):
-        self.assertIsInstance(self.cfg["ollama"]["fallback_model"], str)
+    def test_inference_fallback_model_present(self):
+        self.assertIsInstance(self.cfg["inference"]["fallback_model"], str)
 
-    def test_ollama_timeout_is_positive_int(self):
-        self.assertIsInstance(self.cfg["ollama"]["timeout_seconds"], int)
-        self.assertGreater(self.cfg["ollama"]["timeout_seconds"], 0)
+    def test_inference_timeout_is_positive_int(self):
+        self.assertIsInstance(self.cfg["inference"]["timeout_seconds"], int)
+        self.assertGreater(self.cfg["inference"]["timeout_seconds"], 0)
 
     # extraction section
     def test_extraction_engine_is_valid(self):
@@ -162,8 +162,8 @@ class TestLoadConfigMissingKeys(unittest.TestCase):
 
     def _minimal_valid_config(self) -> dict:
         return {
-            "ollama": {
-                "endpoint": "http://localhost:11434",
+            "inference": {
+                "endpoint": "http://localhost:8080",
                 "model": "test-model",
                 "fallback_model": "test-fallback",
                 "timeout_seconds": 60,
@@ -200,23 +200,23 @@ class TestLoadConfigMissingKeys(unittest.TestCase):
         result = load_config(p)
         self.assertIsInstance(result, dict)
 
-    def test_missing_ollama_endpoint_raises(self):
+    def test_missing_inference_endpoint_raises(self):
         from ingestor import load_config
         cfg = self._minimal_valid_config()
-        del cfg["ollama"]["endpoint"]
+        del cfg["inference"]["endpoint"]
         p = self._write(cfg)
         with self.assertRaises(ValueError) as ctx:
             load_config(p)
-        self.assertIn("ollama.endpoint", str(ctx.exception))
+        self.assertIn("inference.endpoint", str(ctx.exception))
 
-    def test_missing_ollama_section_raises(self):
+    def test_missing_inference_section_raises(self):
         from ingestor import load_config
         cfg = self._minimal_valid_config()
-        del cfg["ollama"]
+        del cfg["inference"]
         p = self._write(cfg)
         with self.assertRaises(ValueError) as ctx:
             load_config(p)
-        self.assertIn("ollama", str(ctx.exception))
+        self.assertIn("inference", str(ctx.exception))
 
     def test_missing_chunking_split_levels_raises(self):
         from ingestor import load_config

@@ -2,8 +2,8 @@
 # End-to-end integration tests for the Kinetic Ingestor pipeline.
 #
 # These tests exercise the full extract → chunk → metadata → HITL → export
-# chain using real filesystem I/O, a synthetic test PDF, and a mocked Ollama
-# client.  They are intentionally excluded from fast unit-test runs:
+# chain using real filesystem I/O, a synthetic test PDF, and a mocked
+# inference client.  They are intentionally excluded from fast unit-test runs:
 #
 #   pytest -m "not integration"   # unit tests only
 #   pytest -m integration         # integration tests only
@@ -73,8 +73,8 @@ def pipeline_config(tmp_path: Path) -> Path:
     - Low token thresholds to guarantee chunking on a tiny test document.
     """
     config = {
-        "ollama": {
-            "endpoint": "http://localhost:11434",
+        "inference": {
+            "endpoint": "http://localhost:8080",
             "model": "test-model",
             "fallback_model": "test-fallback",
             "timeout_seconds": 10,
@@ -104,11 +104,11 @@ def pipeline_config(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Ollama stub
+# Inference stub
 # ---------------------------------------------------------------------------
 
 def _fake_generate_metadata(chunk, config):
-    """Return deterministic, schema-valid metadata without hitting Ollama."""
+    """Return deterministic, schema-valid metadata without hitting the orchestrator."""
     meta = {
         "source_id":        chunk.source_id,
         "source_file":      chunk.source_file,
@@ -158,7 +158,7 @@ class TestNoHitlFlag:
 
 
 class TestFullPipeline:
-    """End-to-end pipeline with --no-hitl and mocked Ollama."""
+    """End-to-end pipeline with --no-hitl and mocked inference."""
 
     def test_pipeline_exits_zero(self, minimal_pdf, pipeline_config):
         with patch("ingestor.metadata.generate_metadata", side_effect=_fake_generate_metadata):
